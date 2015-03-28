@@ -65,7 +65,7 @@ public class Main {
 
                     cvNot(mask, mask);
 
-                    cvErode(mask, mask, kernel, 2);
+                    cvErode(mask, mask, kernel, 3);
 
                     IplImage originalMask = cvCloneImage(mask);
 
@@ -86,7 +86,7 @@ public class Main {
                             contour = contour.h_next();
                         }
 
-                        CvSeq approxy = cvApproxPoly(theBigestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, 10, 1);
+                        CvSeq approxy = cvApproxPoly(theBigestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, 5, 1);
 
                         if(approxy != null && !approxy.isNull()) {
                             if (approxy != null && !approxy.isNull()) {
@@ -99,38 +99,52 @@ public class Main {
                                 }
                             }
 
-                            CvSeq convexHull = cvConvexHull2(approxy, memory, CV_COUNTER_CLOCKWISE, 0);
+                            CvSeq convexHull = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 0);
+                            CvSeq convexHullForDrawing = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 1);
+
+                            if(convexHullForDrawing != null && !convexHullForDrawing.isNull() && convexHullForDrawing.total() > 0) {
+                                CvPoint pt0 = new CvPoint(cvGetSeqElem(convexHullForDrawing, convexHullForDrawing.total() - 1));
+                                for (int i = 0; i < convexHullForDrawing.total(); i++) {
+                                    CvPoint pt = new CvPoint(cvGetSeqElem(convexHullForDrawing, i));
+                                    cvLine(original, pt0, pt, CvScalar.RED, 2, 8, 0);
+                                    pt0 = pt;
+                                }
+                            }
 
                             CvMoments moments = new CvMoments();
 
                             cvMoments(theBigestContour, moments);
 
-                            CvPoint centerOfMass = new CvPoint();
-
-                            if(moments.m00() != 0) {
-                                centerOfMass.x((int) (moments.m10() / moments.m00()));
-                                centerOfMass.y(((int) (moments.m01() / moments.m00())));
-                            }
-
-                            cvCircle(original, centerOfMass, 3, CvScalar.GREEN, 1,1,1);
-
                             if(convexHull != null && !convexHull.isNull() && convexHull.total() > 0) {
-//                                CvPoint hp0 = new CvPoint(cvGetSeqElem(convexHull, convexHull.total() - 1));
-//                                for (int i = 0; i < convexHull.total(); i++) {
-//                                    CvPoint hp = new CvPoint(cvGetSeqElem(convexHull, i));
-//                                    cvLine(original, hp0, hp, CvScalar.RED, 2, 8, 0);
-//                                    hp0 = hp;
-//                                }
 
                                 CvSeq convexityDefects = cvConvexityDefects(approxy, convexHull, memory);
 
                                 if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
+
+                                    CvPoint centerOfMass = new CvPoint();
+
+                                    int x = 0;
+                                    int y = 0;
+                                    int counter = 0;
+
+                                    CvPoint bothPalm = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
+
                                     for (int i = 0; i < convexityDefects.total(); i++) {
                                         CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
-                                        cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW);
-                                        cvCircle(original, defect.start(), 4, CvScalar.BLUE);
-                                        cvCircle(original, defect.end(), 4, CvScalar.BLUE);
+                                        defect.start(bothPalm);
+                                        x += defect.depth_point().x();
+                                        y += defect.depth_point().y();
+                                        counter++;
+
+                                        cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW, 2, 8, 0);
+                                        cvCircle(original, defect.start(), 4, CvScalar.BLUE,2, 8, 0);
+                                        cvCircle(original, defect.end(), 4, CvScalar.BLUE,2, 8, 0);
+                                        bothPalm = defect.end();
                                     }
+                                    centerOfMass.x(x / counter);
+                                    centerOfMass.y(y / counter);
+
+                                    cvCircle(original, centerOfMass, 4, CvScalar.BLUE, 3, 8, 0);
                                 }
                                 cvClearSeq(convexityDefects);
                                 cvClearSeq(convexHull);
@@ -146,7 +160,7 @@ public class Main {
                 }
                 cvShowImage(originalWindow, original);
 
-                if (waitKey(25) == 0) break;
+                if (waitKey(1) == 0) break;
 
             }
         }
