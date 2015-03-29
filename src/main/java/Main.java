@@ -27,8 +27,6 @@ public class Main {
     private static CvCapture camera;
     private static IplImage original;
     private static IplImage mask;
-    private static IplImage h;
-    private static IplImage v;
 
     private static byte[] calibrationHueAndValue;
 
@@ -39,8 +37,9 @@ public class Main {
         String valueWindow = "value window";
 
         camera = cvCreateCameraCapture(0);
+        cvSetCaptureProperty(camera, CV_CAP_PROP_RECTIFICATION, 0);
 
-        IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 2, 2, CV_SHAPE_ELLIPSE);
+        IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 1, 1, CV_SHAPE_ELLIPSE);
         IplConvKernel kernel2 = cvCreateStructuringElementEx(7, 7, 4, 4, CV_SHAPE_ELLIPSE);
 
         if (camera != null) {
@@ -56,16 +55,33 @@ public class Main {
                 original = cvQueryFrame(camera);
 
                 if (calibrated) {
+
                     mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                    IplImage h = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                    IplImage v  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                    IplImage s  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
 
                     cvCvtColor(original, original, CV_BGR2HSV);
-                    cvInRangeS(original, cvScalar(hueMin, satMin, valueMin, 0), cvScalar(hueMax, satMax, valueMax, 0), mask);
+                    cvSplit(original, h, s, v, null);
+
+//                    cvSmooth(h, h, CV_MEDIAN, 5, 5, 3, 3);
+//                    cvInRangeS(original, cvScalar(hueMin, satMin, valueMin, 0), cvScalar(hueMax, satMax, valueMax, 0), mask);
+                    cvInRangeS(h, cvScalar(hueMin), cvScalar(hueMax), h);
+                    cvNot(h, h);
+
+                    cvInRangeS(v, cvScalar(valueMin), cvScalar(valueMax), v);
+//                    cvSmooth(v, v, CV_MEDIAN, 5, 5, 3, 3);
+                    cvInRangeS(s, cvScalar(satMin), cvScalar(satMax), s);
+//                    cvSmooth(s, s, CV_MEDIAN, 5, 5, 3, 3);
 
                     cvCvtColor(original, original, CV_HSV2BGR);
 
-                    cvNot(mask, mask);
+                    cvAnd(h, v, mask);
+                    cvAnd(s, mask, mask);
 
-                    cvErode(mask, mask, kernel, 3);
+//                    cvMorphologyEx(mask,mask, null, kernel, CV_MOP_OPEN, 3);
+                    cvErode(mask, mask, kernel, 2);
+                    cvDilate(mask, mask, kernel, 2);
 
                     IplImage originalMask = cvCloneImage(mask);
 
@@ -154,6 +170,9 @@ public class Main {
 
                     cvShowImage(maskWindow, originalMask);
 
+                    cvReleaseImage(v);
+                    cvReleaseImage(h);
+                    cvReleaseImage(s);
                     cvReleaseImage(mask);
                     cvReleaseImage(originalMask);
 
@@ -161,7 +180,6 @@ public class Main {
                 cvShowImage(originalWindow, original);
 
                 if (waitKey(1) == 0) break;
-
             }
         }
 
@@ -257,7 +275,7 @@ public class Main {
 
     public static void clearAndExit() {
         cvReleaseImage(original);
-        cvReleaseImage(mask);
+        if(mask != null) cvReleaseImage(mask);
         cvReleaseCapture(camera);
     }
 }
