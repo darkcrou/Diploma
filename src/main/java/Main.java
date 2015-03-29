@@ -5,9 +5,11 @@
 
 import javafx.util.converter.PercentageStringConverter;
 import org.bytedeco.javacpp.BytePointer;
+import org.bytedeco.javacpp.FloatPointer;
 import org.bytedeco.javacpp.Loader;
 import org.bytedeco.javacpp.Pointer;
 
+import java.awt.*;
 import java.lang.management.MonitorInfo;
 
 import static org.bytedeco.javacpp.opencv_core.*;
@@ -23,9 +25,15 @@ public class Main {
     private static int valueMax = 255;
     private static int satMin = 0;
     private static int satMax = 255;
+    private static int yMax = 255;
+    private static int yMin = 0;
+    private static int CrMax = 255;
+    private static int CrMin = 0;
+    private static int CbMax = 255;
+    private static int CbMin = 0;
 
     private static CvCapture camera;
-    private static IplImage original;
+    private static IplImage original = cvCreateImage(CvSize.ZERO, IPL_DEPTH_8U, 1);
     private static IplImage mask;
 
     private static byte[] calibrationHueAndValue;
@@ -33,193 +41,187 @@ public class Main {
     public static void main(String[] args) {
 
         String originalWindow = "original window";
-        String maskWindow = "moded window";
-        String valueWindow = "value window";
 
         camera = cvCreateCameraCapture(0);
-        cvSetCaptureProperty(camera, CV_CAP_PROP_RECTIFICATION, 0);
+        cvSetCaptureProperty(camera, CV_CAP_PROP_GAMMA, 0.300);
 
         IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 1, 1, CV_SHAPE_ELLIPSE);
         IplConvKernel kernel2 = cvCreateStructuringElementEx(7, 7, 4, 4, CV_SHAPE_ELLIPSE);
 
+        IplImage patern = cvQueryFrame(camera);
+
         if (camera != null) {
             cvNamedWindow(originalWindow, 0);
-            cvNamedWindow(maskWindow, 0);
+            cvNamedWindow("Value", 0);
+            cvNamedWindow("Hue", 0);
+            cvNamedWindow("Saturation", 0);
 
             CvMemStorage memory = cvCreateMemStorage(0xffff);
+            CvSeq contour = new CvContour();
 
             for (;;) {
 
-                CvSeq contour = new CvContour();
-
+                original.release();
                 original = cvQueryFrame(camera);
 
-                if (calibrated) {
+                mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                IplImage h = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                IplImage v  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                IplImage s  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
 
-                    mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-                    IplImage h = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-                    IplImage v  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-                    IplImage s  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+                cvCvtColor(original, original, CV_BGR2HSV);
+                cvSplit(original, h, s, v, null);
 
-                    cvCvtColor(original, original, CV_BGR2HSV);
-                    cvSplit(original, h, s, v, null);
+                cvInRangeS(h, cvScalar(hueMin), cvScalar(hueMax), h);
+                cvInRangeS(v, cvScalar(valueMin), cvScalar(valueMax), v);
+                cvInRangeS(s, cvScalar(satMin), cvScalar(satMax), s);
 
-//                    cvSmooth(h, h, CV_MEDIAN, 5, 5, 3, 3);
-//                    cvInRangeS(original, cvScalar(hueMin, satMin, valueMin, 0), cvScalar(hueMax, satMax, valueMax, 0), mask);
-                    cvInRangeS(h, cvScalar(hueMin), cvScalar(hueMax), h);
-                    cvNot(h, h);
+                cvSmooth(h, h, CV_GAUSSIAN, 3, 3, 2, 2);
+                cvThreshold(h, h, 100, 255, CV_THRESH_BINARY);
+                cvMorphologyEx(h, h, null, kernel, CV_MOP_OPEN, 2);
 
-                    cvInRangeS(v, cvScalar(valueMin), cvScalar(valueMax), v);
-//                    cvSmooth(v, v, CV_MEDIAN, 5, 5, 3, 3);
-                    cvInRangeS(s, cvScalar(satMin), cvScalar(satMax), s);
-//                    cvSmooth(s, s, CV_MEDIAN, 5, 5, 3, 3);
+                cvAnd(h, s, mask);
+                cvAnd(mask, v, mask);
 
-                    cvCvtColor(original, original, CV_HSV2BGR);
+                cvSmooth(mask, mask, CV_GAUSSIAN, 3, 3, 2, 2);
+                cvThreshold(mask, mask, 10, 255, CV_THRESH_BINARY_INV);
 
-                    cvAnd(h, v, mask);
-                    cvAnd(s, mask, mask);
+                cvCvtColor(original, original, CV_HSV2BGR);
 
-//                    cvMorphologyEx(mask,mask, null, kernel, CV_MOP_OPEN, 3);
-                    cvErode(mask, mask, kernel, 2);
-                    cvDilate(mask, mask, kernel, 2);
+                cvFindContours(mask, memory, contour, Loader.sizeof(CvContour.class), CV_RETR_LIST, CV_CHAIN_APPROX_SIMPLE);
 
-                    IplImage originalMask = cvCloneImage(mask);
+                CvSeq theBigestContour = contour;
 
-                    int count = cvFindContours(mask, memory, contour, Loader.sizeof(CvContour.class), CV_RETR_LIST, CV_CHAIN_APPROX_SIMPLE);
+                while (contour != null && !contour.isNull()) {
+                    if (contour.total() > 0) {
+                        CvSize2D32f size = cvMinAreaRect2(theBigestContour, memory).size();
+                        CvSize2D32f curSize = cvMinAreaRect2(contour, memory).size();
 
-                    if (contour != null && !contour.isNull() && count > 0) {
+                        if (size.height() * size.width() < curSize.height() * curSize.width()) {
+                            theBigestContour = contour;
+                        }
+                    }
+                    contour = contour.h_next();
+                }
 
-                        CvSeq theBigestContour = contour;
+                contour = theBigestContour;
 
-                        while (contour != null && !contour.isNull()) {
-                            if (contour.elem_size() > 0) {
-                                CvSize2D32f size = cvMinAreaRect2(theBigestContour, memory).size();
-                                CvSize2D32f curSize = cvMinAreaRect2(contour, memory).size();
+                if (theBigestContour != null && !theBigestContour.isNull()) {
 
-                                if (size.height() * size.width() < curSize.height() * curSize.width())
-                                    theBigestContour = contour;
-                            }
-                            contour = contour.h_next();
+                    CvSeq approxy = cvApproxPoly(theBigestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, 2, 1);
+
+
+                    if(approxy != null && !approxy.isNull()) {
+                            CvPoint p0 = new CvPoint(cvGetSeqElem(approxy, approxy.total() - 1));
+                            for (int i = 0; i < approxy.total(); i++) {
+                                BytePointer pointer = cvGetSeqElem(approxy, i);
+                                CvPoint p = new CvPoint(pointer);
+                                cvLine(original, p0, p, CvScalar.GREEN, 2, 8, 0);
+                                p0 = p;
                         }
 
-                        CvSeq approxy = cvApproxPoly(theBigestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, 5, 1);
+                        CvSeq convexHull = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 0);
+                        CvSeq convexHullForDrawing = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 1);
 
-                        if(approxy != null && !approxy.isNull()) {
-                            if (approxy != null && !approxy.isNull()) {
-                                CvPoint p0 = new CvPoint(cvGetSeqElem(approxy, approxy.total() - 1));
-                                for (int i = 0; i < approxy.total(); i++) {
-                                    BytePointer pointer = cvGetSeqElem(approxy, i);
-                                    CvPoint p = new CvPoint(pointer);
-                                    cvLine(original, p0, p, CvScalar.GREEN, 2, 8, 0);
-                                    p0 = p;
-                                }
+                        if(convexHullForDrawing != null && !convexHullForDrawing.isNull() && convexHullForDrawing.total() > 0) {
+                            CvPoint pt0 = new CvPoint(cvGetSeqElem(convexHullForDrawing, convexHullForDrawing.total() - 1));
+                            for (int i = 0; i < convexHullForDrawing.total(); i++) {
+
+                                CvPoint pt = new CvPoint(cvGetSeqElem(convexHullForDrawing, i));
+
                             }
+                        }
 
-                            CvSeq convexHull = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 0);
-                            CvSeq convexHullForDrawing = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 1);
+                        CvMoments moments = new CvMoments();
 
-                            if(convexHullForDrawing != null && !convexHullForDrawing.isNull() && convexHullForDrawing.total() > 0) {
-                                CvPoint pt0 = new CvPoint(cvGetSeqElem(convexHullForDrawing, convexHullForDrawing.total() - 1));
-                                for (int i = 0; i < convexHullForDrawing.total(); i++) {
-                                    CvPoint pt = new CvPoint(cvGetSeqElem(convexHullForDrawing, i));
-                                    cvLine(original, pt0, pt, CvScalar.RED, 2, 8, 0);
-                                    pt0 = pt;
+                        cvMoments(theBigestContour, moments);
+
+                        CvPoint centerOfTheArm = new CvPoint();
+
+                        if(moments.m00()!= 0) {
+                            centerOfTheArm.x(((int) (moments.m10() / moments.m00())));
+                            centerOfTheArm.y((int)(moments.m01() / moments.m00()));
+                        }
+
+                        cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
+
+                        if(convexHull != null && !convexHull.isNull() && convexHull.total() > 0) {
+
+                            CvSeq convexityDefects = cvConvexityDefects(approxy, convexHull, memory);
+
+                            if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
+
+                                CvPoint centerOfMass = new CvPoint();
+
+                                int averageDepth = 0;
+                                int x = 0;
+                                int y = 0;
+                                int counter = 0;
+
+                                CvPoint bothPalm = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
+
+                                CvSeq depthPoints = cvCloneSeq(contour);
+                                cvClearSeq(depthPoints);
+
+                                for (int i = 0; i < convexityDefects.total(); i++) {
+
+                                    CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
+                                    cvSeqPush(depthPoints, defect.depth_point());
+
+                                    defect.start(bothPalm);
+
+                                    x += defect.depth_point().x();
+                                    y += defect.depth_point().y();
+                                    averageDepth += defect.depth();
+                                    counter++;
+
+                                    cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW, 2, 8, 0);
+                                    cvCircle(original, defect.start(), 4, CvScalar.BLUE, 2, 8, 0);
+                                    cvCircle(original, defect.end(), 4, CvScalar.BLUE, 2, 8, 0);
+                                    bothPalm = defect.end();
+
                                 }
+
+                                averageDepth = Math.round(averageDepth / counter);
+
+                                float [] center = new float[2];
+                                float [] radius = new float[1];
+
+                                cvMinEnclosingCircle(depthPoints, center, radius);
+
+                                CvPoint centerOfThePalm = cvPoint(((int) ((center[0] + x / counter) / 2)), ((int) ((center[1] + y / counter) / 2)));
+
+                                cvCircle(original, centerOfThePalm, ((int) radius[0]), CvScalar.BLUE, 2, 8, 0);
+
+                                centerOfMass.x(x / counter);
+                                centerOfMass.y(y / counter);
+
+                                cvCircle(original, centerOfMass, 4, CvScalar.BLUE, 3, 8, 0);
                             }
-
-                            CvMoments moments = new CvMoments();
-
-                            cvMoments(theBigestContour, moments);
-
-                            if(convexHull != null && !convexHull.isNull() && convexHull.total() > 0) {
-
-                                CvSeq convexityDefects = cvConvexityDefects(approxy, convexHull, memory);
-
-                                if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
-
-                                    CvPoint centerOfMass = new CvPoint();
-
-                                    int x = 0;
-                                    int y = 0;
-                                    int counter = 0;
-
-                                    CvPoint bothPalm = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
-
-                                    for (int i = 0; i < convexityDefects.total(); i++) {
-                                        CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
-                                        defect.start(bothPalm);
-                                        x += defect.depth_point().x();
-                                        y += defect.depth_point().y();
-                                        counter++;
-
-                                        cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW, 2, 8, 0);
-                                        cvCircle(original, defect.start(), 4, CvScalar.BLUE,2, 8, 0);
-                                        cvCircle(original, defect.end(), 4, CvScalar.BLUE,2, 8, 0);
-                                        bothPalm = defect.end();
-                                    }
-                                    centerOfMass.x(x / counter);
-                                    centerOfMass.y(y / counter);
-
-                                    cvCircle(original, centerOfMass, 4, CvScalar.BLUE, 3, 8, 0);
-                                }
-                                cvClearSeq(convexityDefects);
-                                cvClearSeq(convexHull);
-                            }
+                            cvClearSeq(convexityDefects);
+                            cvClearSeq(convexHull);
                         }
                     }
 
-                    cvShowImage(maskWindow, originalMask);
-
-                    cvReleaseImage(v);
-                    cvReleaseImage(h);
-                    cvReleaseImage(s);
-                    cvReleaseImage(mask);
-                    cvReleaseImage(originalMask);
-
                 }
+                cvShowImage("Hue", h);
+                cvShowImage("Saturation", s);
+                cvShowImage("Value", v);
+                cvShowImage("Mask", mask);
                 cvShowImage(originalWindow, original);
 
+                cvReleaseImage(v);
+                cvReleaseImage(h);
+                cvReleaseImage(s);
+                cvReleaseImage(mask);
                 if (waitKey(1) == 0) break;
             }
         }
 
         cvReleaseStructuringElement(kernel);
+        cvReleaseStructuringElement(kernel2);
         cvReleaseCapture(camera);
         cvDestroyAllWindows();
-
-    }
-
-    public static byte[] calibration(IplImage calibrateImage) {
-
-        CvSize size = cvSize(20, 20);
-
-        CvPoint center = cvPoint(calibrateImage.width() / 2, calibrateImage.height() / 2);
-
-        byte maxHue = 0;
-        byte minHue = 0;
-        byte maxValue = 0;
-        byte minValue = 0;
-
-        for (int x = center.x() - size.width() / 2; x < center.x() + size.width() / 2; x++) {
-            for (int y = center.y() - size.height() / 2; y < center.y() + size.height() / 2; y++) {
-                byte hue = calibrateImage.imageData().get(y * calibrateImage.widthStep() + x * 3);
-                byte value = calibrateImage.imageData().get(y * calibrateImage.widthStep() + x * 3 + 2);
-
-                if (maxHue < hue && hue != maxHue) maxHue = hue;
-                else minHue = hue;
-                if (maxValue < value && value != maxValue) maxValue = value;
-                else minValue = value;
-            }
-        }
-
-        System.out.println("minHue" + minHue);
-        System.out.println("maxHue" + maxHue);
-        System.out.println("minValue" + minValue);
-        System.out.println("maxValue" + maxValue);
-
-        calibrated = true;
-
-        return new byte[]{minHue, maxHue, minValue, maxValue};
     }
 
     public static int waitKey(int FPS) {
@@ -229,45 +231,41 @@ public class Main {
             case 'q':
                 clearAndExit();
                 return 0;
-            case 'p':
-                calibrationHueAndValue = calibration(original);
-                System.out.println("Calibrated.");
-                break;
             case 'h':
-                System.out.println("Hue max: " + (hueMax -= 5));
+                System.out.println("Hue max: " + (hueMax -= 1));
                 break;
             case 'H':
-                System.out.println("Hue max: " + (hueMax += 5));
+                System.out.println("Hue max: " + (hueMax += 1));
                 break;
             case 'x':
-                System.out.println("Hue min: " + (hueMin -= 5));
+                System.out.println("Hue min: " + (hueMin -= 1));
                 break;
             case 'X':
-                System.out.println("Hue min: " + (hueMin += 5));
+                System.out.println("Hue min: " + (hueMin += 1));
                 break;
             case 's':
-                System.out.println("Saturation max: " + (satMax -= 5));
+                System.out.println("Saturation max: " + (satMax -= 1));
                 break;
             case 'S':
-                System.out.println("Saturation max: " + (satMax += 5));
+                System.out.println("Saturation max: " + (satMax += 1));
                 break;
             case 'c':
-                System.out.println("Saturation min: " + (satMin -= 5));
+                System.out.println("Saturation min: " + (satMin -= 1));
                 break;
             case 'C':
-                System.out.println("Saturation min: " + (satMin += 5));
+                System.out.println("Saturation min: " + (satMin += 1));
                 break;
             case 'w':
-                System.out.println("Value min: " + (valueMin -= 5));
+                System.out.println("Value min: " + (valueMin -= 1));
                 break;
             case 'W':
-                System.out.println("Value min: " + (valueMin += 5));
+                System.out.println("Value min: " + (valueMin += 1));
                 break;
             case 'v':
-                System.out.println("Value max: " + (valueMax -= 5));
+                System.out.println("Value max: " + (valueMax -= 1));
                 break;
             case 'V':
-                System.out.println("Value max: " + (valueMax += 5));
+                System.out.println("Value max: " + (valueMax += 1));
                 break;
         }
         return 1;
