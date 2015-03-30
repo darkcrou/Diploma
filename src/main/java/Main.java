@@ -3,14 +3,12 @@
  */
 
 
-import javafx.util.converter.PercentageStringConverter;
-import org.bytedeco.javacpp.BytePointer;
-import org.bytedeco.javacpp.FloatPointer;
-import org.bytedeco.javacpp.Loader;
-import org.bytedeco.javacpp.Pointer;
+import org.bytedeco.javacpp.*;
 
+import javax.swing.*;
 import java.awt.*;
-import java.lang.management.MonitorInfo;
+import java.util.HashSet;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.bytedeco.javacpp.opencv_core.*;
 import static org.bytedeco.javacpp.opencv_highgui.*;
@@ -18,7 +16,10 @@ import static org.bytedeco.javacpp.opencv_imgproc.*;
 
 public class Main {
 
-    private static boolean calibrated;
+    private static ConcurrentHashMap<String, Integer> settingsHolder = new ConcurrentHashMap<String, Integer>();
+
+    private static boolean byHSV;
+
     private static int hueMin = 0;
     private static int hueMax = 180;
     private static int valueMin = 0;
@@ -32,23 +33,38 @@ public class Main {
     private static int CbMax = 255;
     private static int CbMin = 0;
 
+    private static boolean hueInverted;
+    private static boolean saturationInverted;
+    private static boolean valueInverted;
+    private static boolean channelYInverted;
+    private static boolean chanelCrInverted;
+    private static boolean chanelCbInverted;
+
     private static CvCapture camera;
-    private static IplImage original = cvCreateImage(CvSize.ZERO, IPL_DEPTH_8U, 1);
-    private static IplImage mask;
+
+    private static IplImage original;
+
+    private static IplImage hue;
+    private static IplImage saturation;
+    private static IplImage value;
+    private static IplImage chanelY;
+    private static IplImage chanelCr;
+    private static IplImage chanelCb;
 
     private static byte[] calibrationHueAndValue;
 
+    private static IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 1, 1, CV_SHAPE_ELLIPSE);
+    private static IplConvKernel kernel2 = cvCreateStructuringElementEx(7, 7, 4, 4, CV_SHAPE_ELLIPSE);
+    private static CvMemStorage memory = cvCreateMemStorage(0xffff);
+    private static CvSeq approximation;
+    private static CvPoint centerOfPalm;
+    private static HashSet<CvPoint> fingerTips = new HashSet<>();
+
+    private static String originalWindow = "original window";
+
     public static void main(String[] args) {
 
-        String originalWindow = "original window";
-
         camera = cvCreateCameraCapture(0);
-        cvSetCaptureProperty(camera, CV_CAP_PROP_GAMMA, 0.300);
-
-        IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 1, 1, CV_SHAPE_ELLIPSE);
-        IplConvKernel kernel2 = cvCreateStructuringElementEx(7, 7, 4, 4, CV_SHAPE_ELLIPSE);
-
-        IplImage patern = cvQueryFrame(camera);
 
         if (camera != null) {
             cvNamedWindow(originalWindow, 0);
@@ -56,166 +72,8 @@ public class Main {
             cvNamedWindow("Hue", 0);
             cvNamedWindow("Saturation", 0);
 
-            CvMemStorage memory = cvCreateMemStorage(0xffff);
-            CvSeq contour = new CvContour();
+            process();
 
-            for (;;) {
-
-                original.release();
-                original = cvQueryFrame(camera);
-
-                mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-                IplImage h = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-                IplImage v  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-                IplImage s  = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
-
-                cvCvtColor(original, original, CV_BGR2HSV);
-                cvSplit(original, h, s, v, null);
-
-                cvInRangeS(h, cvScalar(hueMin), cvScalar(hueMax), h);
-                cvInRangeS(v, cvScalar(valueMin), cvScalar(valueMax), v);
-                cvInRangeS(s, cvScalar(satMin), cvScalar(satMax), s);
-
-                cvSmooth(h, h, CV_GAUSSIAN, 3, 3, 2, 2);
-                cvThreshold(h, h, 100, 255, CV_THRESH_BINARY);
-                cvMorphologyEx(h, h, null, kernel, CV_MOP_OPEN, 2);
-
-                cvAnd(h, s, mask);
-                cvAnd(mask, v, mask);
-
-                cvSmooth(mask, mask, CV_GAUSSIAN, 3, 3, 2, 2);
-                cvThreshold(mask, mask, 10, 255, CV_THRESH_BINARY_INV);
-
-                cvCvtColor(original, original, CV_HSV2BGR);
-
-                cvFindContours(mask, memory, contour, Loader.sizeof(CvContour.class), CV_RETR_LIST, CV_CHAIN_APPROX_SIMPLE);
-
-                CvSeq theBigestContour = contour;
-
-                while (contour != null && !contour.isNull()) {
-                    if (contour.total() > 0) {
-                        CvSize2D32f size = cvMinAreaRect2(theBigestContour, memory).size();
-                        CvSize2D32f curSize = cvMinAreaRect2(contour, memory).size();
-
-                        if (size.height() * size.width() < curSize.height() * curSize.width()) {
-                            theBigestContour = contour;
-                        }
-                    }
-                    contour = contour.h_next();
-                }
-
-                contour = theBigestContour;
-
-                if (theBigestContour != null && !theBigestContour.isNull()) {
-
-                    CvSeq approxy = cvApproxPoly(theBigestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, 2, 1);
-
-
-                    if(approxy != null && !approxy.isNull()) {
-                            CvPoint p0 = new CvPoint(cvGetSeqElem(approxy, approxy.total() - 1));
-                            for (int i = 0; i < approxy.total(); i++) {
-                                BytePointer pointer = cvGetSeqElem(approxy, i);
-                                CvPoint p = new CvPoint(pointer);
-                                cvLine(original, p0, p, CvScalar.GREEN, 2, 8, 0);
-                                p0 = p;
-                        }
-
-                        CvSeq convexHull = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 0);
-                        CvSeq convexHullForDrawing = cvConvexHull2(approxy, memory, CV_CLOCKWISE, 1);
-
-                        if(convexHullForDrawing != null && !convexHullForDrawing.isNull() && convexHullForDrawing.total() > 0) {
-                            CvPoint pt0 = new CvPoint(cvGetSeqElem(convexHullForDrawing, convexHullForDrawing.total() - 1));
-                            for (int i = 0; i < convexHullForDrawing.total(); i++) {
-
-                                CvPoint pt = new CvPoint(cvGetSeqElem(convexHullForDrawing, i));
-
-                            }
-                        }
-
-                        CvMoments moments = new CvMoments();
-
-                        cvMoments(theBigestContour, moments);
-
-                        CvPoint centerOfTheArm = new CvPoint();
-
-                        if(moments.m00()!= 0) {
-                            centerOfTheArm.x(((int) (moments.m10() / moments.m00())));
-                            centerOfTheArm.y((int)(moments.m01() / moments.m00()));
-                        }
-
-                        cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
-
-                        if(convexHull != null && !convexHull.isNull() && convexHull.total() > 0) {
-
-                            CvSeq convexityDefects = cvConvexityDefects(approxy, convexHull, memory);
-
-                            if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
-
-                                CvPoint centerOfMass = new CvPoint();
-
-                                int averageDepth = 0;
-                                int x = 0;
-                                int y = 0;
-                                int counter = 0;
-
-                                CvPoint bothPalm = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
-
-                                CvSeq depthPoints = cvCloneSeq(contour);
-                                cvClearSeq(depthPoints);
-
-                                for (int i = 0; i < convexityDefects.total(); i++) {
-
-                                    CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
-                                    cvSeqPush(depthPoints, defect.depth_point());
-
-                                    defect.start(bothPalm);
-
-                                    x += defect.depth_point().x();
-                                    y += defect.depth_point().y();
-                                    averageDepth += defect.depth();
-                                    counter++;
-
-                                    cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW, 2, 8, 0);
-                                    cvCircle(original, defect.start(), 4, CvScalar.BLUE, 2, 8, 0);
-                                    cvCircle(original, defect.end(), 4, CvScalar.BLUE, 2, 8, 0);
-                                    bothPalm = defect.end();
-
-                                }
-
-                                averageDepth = Math.round(averageDepth / counter);
-
-                                float [] center = new float[2];
-                                float [] radius = new float[1];
-
-                                cvMinEnclosingCircle(depthPoints, center, radius);
-
-                                CvPoint centerOfThePalm = cvPoint(((int) ((center[0] + x / counter) / 2)), ((int) ((center[1] + y / counter) / 2)));
-
-                                cvCircle(original, centerOfThePalm, ((int) radius[0]), CvScalar.BLUE, 2, 8, 0);
-
-                                centerOfMass.x(x / counter);
-                                centerOfMass.y(y / counter);
-
-                                cvCircle(original, centerOfMass, 4, CvScalar.BLUE, 3, 8, 0);
-                            }
-                            cvClearSeq(convexityDefects);
-                            cvClearSeq(convexHull);
-                        }
-                    }
-
-                }
-                cvShowImage("Hue", h);
-                cvShowImage("Saturation", s);
-                cvShowImage("Value", v);
-                cvShowImage("Mask", mask);
-                cvShowImage(originalWindow, original);
-
-                cvReleaseImage(v);
-                cvReleaseImage(h);
-                cvReleaseImage(s);
-                cvReleaseImage(mask);
-                if (waitKey(1) == 0) break;
-            }
         }
 
         cvReleaseStructuringElement(kernel);
@@ -229,7 +87,6 @@ public class Main {
         switch (key) {
             case 27:
             case 'q':
-                clearAndExit();
                 return 0;
             case 'h':
                 System.out.println("Hue max: " + (hueMax -= 1));
@@ -271,9 +128,240 @@ public class Main {
         return 1;
     }
 
-    public static void clearAndExit() {
-        cvReleaseImage(original);
-        if(mask != null) cvReleaseImage(mask);
-        cvReleaseCapture(camera);
+    private static CvSeq findTheBiggestContour(IplImage mask) {
+
+        cvClearMemStorage(memory);
+
+        CvSeq contour = new CvContour(null);
+
+        cvFindContours(mask, memory, contour, Loader.sizeof(CvContour.class), CV_RETR_LIST, CV_CHAIN_APPROX_SIMPLE);
+
+        CvSeq theBiggestContour = contour;
+
+        while (contour != null && !contour.isNull()) {
+            if (contour.total() > 0) {
+                if (cvContourArea(theBiggestContour) < cvContourArea(contour)) {
+                    theBiggestContour = contour;
+                }
+            }
+            contour = contour.h_next();
+        }
+
+        return theBiggestContour;
+    }
+
+    private static IplImage createMaskFromHSV(IplImage original) {
+
+        IplImage mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+        hue = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+        saturation = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+        value = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
+
+        cvCvtColor(original, original, CV_BGR2HSV);
+        cvSplit(original, hue, saturation, value, null);
+
+        cvInRangeS(hue, cvScalar(hueMin), cvScalar(hueMax), hue);
+        cvInRangeS(saturation, cvScalar(valueMin), cvScalar(valueMax), saturation);
+        cvInRangeS(value, cvScalar(satMin), cvScalar(satMax), value);
+
+        cvErode(hue, hue, kernel, 1);
+        cvDilate(hue, hue, kernel, 1);
+
+        cvNot(hue, hue);
+        cvAnd(hue, value, mask);
+        cvAnd(mask, saturation, mask);
+        cvCvtColor(original, original, CV_HSV2BGR);
+
+        return mask;
+    }
+
+    private static void drawSequence(CvSeq approximation, IplImage on) {
+        CvPoint p0 = new CvPoint(cvGetSeqElem(approximation, approximation.total() - 1));
+        for (int i = 0; i < approximation.total(); i++) {
+            BytePointer pointer = cvGetSeqElem(approximation, i);
+            CvPoint p = new CvPoint(pointer);
+            cvLine(on, p0, p, CvScalar.GREEN, 2, 8, 0);
+            p0 = p;
+        }
+    }
+
+    private static CvSeq findDominantPoints(CvSeq contour, int dist, int angle) {
+
+        CvSeq points = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), memory);
+
+        for(int i = 0; i < contour.total() - dist * 2; i++) {
+            CvPoint p0 = new CvPoint(cvGetSeqElem(contour, i));
+            CvPoint p = new CvPoint(cvGetSeqElem(contour, (i + dist)));
+            CvPoint p1 = new CvPoint(cvGetSeqElem(contour, (i + dist * 2)));
+
+            int [] vector1 = new int[]{
+                    p.x() - p0.x(),
+                    p.y() - p0.y()
+            };
+            int [] vector2 = new int[]{
+                    p.x() - p1.x(),
+                    p.y() - p1.y()
+            };
+
+            int dotProduct = vector1[0]*vector2[0] + vector1[1]*vector2[1];
+            int cosine = (int) (dotProduct / (Math.sqrt(vector1[0]*vector1[0] + vector1[1]*vector1[1]) * Math.sqrt(vector2[0]*vector2[0] + vector2[1]*vector2[1])));
+
+            if(cosine < Math.cos(angle)) {
+                cvSeqPush(points, p);
+            }
+
+        }
+
+        return points;
+    }
+
+    private static void process() {
+        for (;;) {
+
+            original = cvQueryFrame(camera);
+
+            IplImage mask = createMaskFromHSV(original);
+
+            CvSeq theBiggestContour = findTheBiggestContour(mask);
+
+            if (theBiggestContour != null && !theBiggestContour.isNull()) {
+
+                approximation = cvApproxPoly(theBiggestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, cvContourPerimeter(theBiggestContour) * 0.0015, 1);
+
+                if(approximation != null && !approximation.isNull()) {
+
+                    System.out.println("Approxi length: " + approximation.total());
+
+                    CvSeq dominantPoints = findDominantPoints(approximation, ((int) (approximation.total() * 0.2)), 120);
+                    System.out.println("Dominant points found: " + dominantPoints.total());
+                    drawSequence(approximation, original);
+
+                    CvMoments moments = new CvMoments();
+
+                    cvMoments(theBiggestContour, moments);
+
+                    CvPoint centerOfTheArm = new CvPoint();
+
+                    if(moments.m00()!= 0) {
+                        centerOfTheArm.x(((int) (moments.m10() / moments.m00())));
+                        centerOfTheArm.y((int)(moments.m01() / moments.m00()));
+                    }
+
+                    cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
+
+                    CvSeq convexHull = cvConvexHull2(approximation, memory, CV_CLOCKWISE, 0);
+
+                    if(convexHull != null && !convexHull.isNull() && convexHull.total() > 0) {
+
+                        CvSeq convexityDefects = cvConvexityDefects(approximation, convexHull, memory);
+
+                        if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
+
+                            CvPoint centerOfMass = new CvPoint();
+
+                            int averageDepth = 0;
+                            int x = 0;
+                            int y = 0;
+
+                            CvPoint tempPoint = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
+
+                            CvSeq depthPoints = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), memory);
+
+                            for (int i = 0; i < convexityDefects.total(); i++) {
+
+                                CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
+                                if(defect.depth() > 10) {
+                                    cvSeqPush(depthPoints, defect.depth_point());
+
+                                    defect.start(tempPoint);
+
+                                    x += defect.depth_point().x();
+                                    y += defect.depth_point().y();
+                                    averageDepth += defect.depth();
+
+                                    cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW, 2, 8, 0);
+                                    cvCircle(original, defect.start(), 4, CvScalar.BLUE, 2, 8, 0);
+                                    cvCircle(original, defect.end(), 4, CvScalar.BLUE, 2, 8, 0);
+                                    tempPoint = defect.end();
+                                }
+                            }
+
+                            if(depthPoints.total() > 0) {
+                                averageDepth = Math.round(averageDepth / depthPoints.total());
+
+                                float [] center = new float[2];
+                                float [] radius = new float[1];
+
+                                cvMinEnclosingCircle(depthPoints, center, radius);
+
+                                CvPoint centerOfThePalm = cvPoint(((int) ((center[0] + x / depthPoints.total()) / 2)), ((int) ((center[1] + y / depthPoints.total()) / 2)));
+
+                                cvCircle(original, centerOfThePalm, ((int) (radius[0] + averageDepth) / 2), CvScalar.BLUE, 2, 8, 0);
+
+                                centerOfMass.x(x / depthPoints.total());
+                                centerOfMass.y(y / depthPoints.total());
+
+                                cvCircle(original, centerOfMass, 4, CvScalar.BLUE, 3, 8, 0);
+                            }
+
+                        }
+                        cvClearSeq(convexityDefects);
+                        cvClearSeq(convexHull);
+                    }
+                }
+
+            }
+            cvShowImage("Hue", hue);
+            cvShowImage("Saturation", saturation);
+            cvShowImage("Value", value);
+//            cvShowImage("Mask", mask);
+            cvShowImage(originalWindow, original);
+
+            cvReleaseImage(value);
+            cvReleaseImage(hue);
+            cvReleaseImage(saturation);
+            cvReleaseImage(mask);
+            if (waitKey(1) == 0) break;
+        }
+
+        Thread images = new Thread();
+
+    }
+
+    private static void configurationWindow() {
+        Runnable configWindow = () -> {
+            JFrame configurationFrame = new JFrame("Configuration frame");
+            configurationFrame.setMinimumSize(new Dimension(300, 100));
+
+            JSlider hueMinSlider = new JSlider(0, 180);
+            JSlider hueMaxSlider = new JSlider(0, 180);
+            hueMinSlider.addPropertyChangeListener((e) -> {
+                JSlider slider = (JSlider) e.getSource();
+                if(!slider.getValueIsAdjusting()){
+                    settingsHolder.put("hueMin", slider.getValue());
+                }
+            });
+
+            JSlider saturationMinSlider = new JSlider(0, 255);
+            JSlider saturationMaxSlider = new JSlider(0, 255);
+            JSlider valueMinSlider = new JSlider(0, 255);
+            JSlider valueMaxSlider = new JSlider(0, 255);
+            JSlider chanelYMinSlider = new JSlider(0, 255);
+            JSlider chanelYMaxSlider = new JSlider(0, 255);
+            JSlider chanelCrMinSlider = new JSlider(0, 255);
+            JSlider chanelCrMaxSlider = new JSlider(0, 255);
+            JSlider chanelCbMinSlider = new JSlider(0, 255);
+            JSlider chanelCbMaxSlider = new JSlider(0, 255);
+
+            JCheckBox colorSchema = new JCheckBox("Color schema selector");
+
+            configurationFrame.add(hueMinSlider);
+            configurationFrame.setVisible(true);
+            configurationFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
+
+        };
+
+        Thread windowThread = new Thread(configWindow);
+        windowThread.start();
     }
 }
