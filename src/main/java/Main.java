@@ -4,10 +4,13 @@
 
 
 import org.bytedeco.javacpp.*;
+import org.bytedeco.javacv.CanvasFrame;
+import sun.awt.X11GraphicsDevice;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.HashSet;
+import java.util.*;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.bytedeco.javacpp.opencv_core.*;
@@ -60,11 +63,25 @@ public class Main {
     private static CvPoint centerOfPalm;
     private static HashSet<CvPoint> fingerTips = new HashSet<>();
 
+    private static Robot robot;
+
     private static String originalWindow = "original window";
+    private static double screenWidth;
+    private static double screenHeight;
 
     public static void main(String[] args) {
 
         camera = cvCreateCameraCapture(0);
+
+        GraphicsDevice device = CanvasFrame.getDefaultScreenDevice();
+        screenHeight = device.getDefaultConfiguration().getBounds().getHeight();
+        screenWidth = device.getDefaultConfiguration().getBounds().getWidth();
+
+        try {
+            robot = new Robot(CanvasFrame.getDefaultScreenDevice());
+        } catch (AWTException e) {
+            System.err.print("Cannot initialize ROBOT, so you could not move the cursor");
+        }
 
         if (camera != null) {
             cvNamedWindow(originalWindow, 0);
@@ -128,11 +145,16 @@ public class Main {
         return 1;
     }
 
-    private static CvSeq findTheBiggestContour(IplImage mask) {
+    /**
+     * Funkcja wyszukuje nawjekszy zarys na podanej masce.
+     * @param mask - maska na ktorej bedzie wyszukiwany zarys
+     * @return CvSeq z wyszukanym zarysem*/
+
+     private static CvSeq findTheBiggestContour(IplImage mask) {
 
         cvClearMemStorage(memory);
 
-        CvSeq contour = new CvContour(null);
+        CvSeq contour = new CvContour(null); //Tworzymy nowy ciag dla nowego zarysu
 
         cvFindContours(mask, memory, contour, Loader.sizeof(CvContour.class), CV_RETR_LIST, CV_CHAIN_APPROX_SIMPLE);
 
@@ -150,7 +172,12 @@ public class Main {
         return theBiggestContour;
     }
 
-    private static IplImage createMaskFromHSV(IplImage original) {
+    /**
+     * Funkcja ktora rozdziela obrazek na 3 kanaly przestrzeni kolorowej HSV, filtruje kanaly i skleja z powrotem w nowoutworzona maske
+     * @param original - oryginalny obrazek dla przetwarzania do maski
+     * @return mask - maska */
+
+     private static IplImage createMaskFromHSV(IplImage original) {
 
         IplImage mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
         hue = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
@@ -164,8 +191,9 @@ public class Main {
         cvInRangeS(saturation, cvScalar(valueMin), cvScalar(valueMax), saturation);
         cvInRangeS(value, cvScalar(satMin), cvScalar(satMax), value);
 
-        cvErode(hue, hue, kernel, 1);
-        cvDilate(hue, hue, kernel, 1);
+        cvDilate(hue, hue, kernel, 4);
+        cvErode(hue, hue, kernel, 7);
+//        cvMorphologyEx(hue, hue, null, kernel, CV_MOP_CLOSE, 2);
 
         cvNot(hue, hue);
         cvAnd(hue, value, mask);
@@ -175,7 +203,7 @@ public class Main {
         return mask;
     }
 
-    private static void drawSequence(CvSeq approximation, IplImage on) {
+    private static void drawSequencePolyLines(CvSeq approximation, IplImage on) {
         CvPoint p0 = new CvPoint(cvGetSeqElem(approximation, approximation.total() - 1));
         for (int i = 0; i < approximation.total(); i++) {
             BytePointer pointer = cvGetSeqElem(approximation, i);
@@ -185,40 +213,184 @@ public class Main {
         }
     }
 
-    private static CvSeq findDominantPoints(CvSeq contour, int dist, int angle) {
+    private static CvSeq findFingers(CvSeq dominantPoints, CvPoint palmCenter, float radius) {
+        if(dominantPoints == null) throw new RuntimeException("Given dominantPoints is NULL");
+        if(dominantPoints.isNull()) throw new RuntimeException("Given dominantPoints has NULL values");
+        int dominantCounts = dominantPoints.total();
+        if(dominantCounts == 0) throw new RuntimeException("Given dominantPoints has no values");
 
-        CvSeq points = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), memory);
+        CvSeq fingers = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvSeq.class), Loader.sizeof(CvPoint.class), memory);
 
-        for(int i = 0; i < contour.total() - dist * 2; i++) {
-            CvPoint p0 = new CvPoint(cvGetSeqElem(contour, i));
-            CvPoint p = new CvPoint(cvGetSeqElem(contour, (i + dist)));
-            CvPoint p1 = new CvPoint(cvGetSeqElem(contour, (i + dist * 2)));
-
-            int [] vector1 = new int[]{
-                    p.x() - p0.x(),
-                    p.y() - p0.y()
-            };
-            int [] vector2 = new int[]{
-                    p.x() - p1.x(),
-                    p.y() - p1.y()
-            };
-
-            int dotProduct = vector1[0]*vector2[0] + vector1[1]*vector2[1];
-            int cosine = (int) (dotProduct / (Math.sqrt(vector1[0]*vector1[0] + vector1[1]*vector1[1]) * Math.sqrt(vector2[0]*vector2[0] + vector2[1]*vector2[1])));
-
-            if(cosine < Math.cos(angle)) {
-                cvSeqPush(points, p);
+        for(int i = 0; i < dominantCounts; i++) {
+            CvPoint dominantPoint = new CvPoint(cvGetSeqElem(dominantPoints, i));
+            double distance = vectorLength(vector(dominantPoint, palmCenter));
+            if(distance > radius * 1.4 && distance <= radius * 2.4 && fingers.total() < 5) {
+                cvSeqPush(fingers, dominantPoint);
             }
+        }
 
+        return fingers;
+    }
+
+    private static CvSeq findDominantPoints(CvSeq contour, int minDist, int angle) {
+        CvSeq points = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(contour.getClass()),
+                    Loader.sizeof(CvPoint.class), memory);
+        int groupCounter = 0;
+        double angleCosine = Math.cos(angle);
+        LinkedList<CvPoint> group = new LinkedList<>();
+
+        for(int i = 0; i < contour.total(); i++) {
+
+            CvPoint p0 = new CvPoint(cvGetSeqElem(contour, i % contour.total()));
+
+            CvPoint p = new CvPoint(cvGetSeqElem(contour, (i + minDist) % contour.total()));
+            CvPoint p1 = new CvPoint(cvGetSeqElem(contour, (i + minDist * 2) % contour.total()));
+
+            int [] vector1 = vector(p, p0);
+            int [] vector2 = vector(p, p1);
+            double dotProduct = vectorDotProduct(vector1, vector2);
+            double cosine = dotProduct / vectorLength(vector1) / vectorLength(vector2);
+
+            if(cosine > angleCosine) {
+                group.push(p);
+            } else if(group.size() > 0) {
+                groupCounter++;
+                CvPoint dominant = localDominant(group);
+                if(dominant != null) cvSeqPush(points, dominant);
+                group.clear();
+            }
         }
 
         return points;
     }
 
+    public static CvPoint localDominant(List segment) {
+        if(segment == null) throw new RuntimeException("Your local contour is NULL");
+        int contourLength = segment.size();
+        CvPoint localDominant = null;
+        if(contourLength < 3){
+            if(contourLength == 2) {
+                CvPoint first = (CvPoint) segment.get(0);
+                CvPoint second = (CvPoint) segment.get(1);
+                localDominant = new CvPoint();
+                localDominant.x((first.x() + second.x())/2);
+                localDominant.y((first.y() + second.y())/2);
+                return localDominant;
+            }
+            if(contourLength == 1) return (CvPoint)segment.get(0);
+            return localDominant;
+        }
+
+        CvPoint first = (CvPoint)segment.get(0);
+        CvPoint last = (CvPoint)segment.get(contourLength - 1);
+        double theLongestVector = 0;
+        int [] mainVector = vector(first, last);
+
+        for(int i = 1; i < contourLength - 1; i++) {
+            CvPoint temp = (CvPoint)segment.get(i);
+//            int [] tempVector = vector(temp, first);
+//            double t = (tempVector[0] * mainVector[0] + tempVector[1] * mainVector[1]) / vectorLength(mainVector);
+//            double tempLength = vectorLength(new double [] {(tempVector[0] + mainVector[0] * t), (tempVector[1] + mainVector[1] * t)});
+//
+            double tempLength = Math.abs((mainVector[1] * temp.x() - mainVector[0] * temp.y() + last.x()*first.y() - last.y()*first.x())) / Math.sqrt(vectorLength(mainVector));
+            if(tempLength > theLongestVector) {
+                localDominant = temp;
+                theLongestVector = tempLength;
+            }
+        }
+
+        return localDominant;
+    }
+
+    private static double vectorLength(int [] vector) {
+        return Math.sqrt(vector[0]*vector[0] + vector[1]*vector[1]);
+    }
+
+    private static double vectorLength(double [] vector) {
+        return Math.sqrt(vector[0]*vector[0] + vector[1]*vector[1]);
+    }
+
+    private static int vectorDotProduct(int [] vector1, int [] vector2) {
+        return vector1[0]*vector2[0] + vector1[1]*vector2[1];
+    }
+
+    private static int[] vector(CvPoint first, CvPoint second) {
+        if(first == null) throw new RuntimeException("Cannot count vector 'cuz FIRST point is NULL");
+        if(second == null) throw new RuntimeException("Cannot count vector 'cuz SECOND point is NULL");
+        if(first.isNull()) throw new RuntimeException("Cannot count vector 'cuz FIRST point has NULL data");
+        if(second.isNull()) throw new RuntimeException("Cannot count vector 'cuz SECOND point has NULL data");
+
+        return  new int[]{
+                second.x() - first.x(),
+                second.y() - first.y()
+        };
+    }
+
+    public static CvSeq findDeepestPoints(CvSeq convexityDefects) {
+        if(convexityDefects == null) throw new RuntimeException("Given convexityDefects is NULL");
+        if(convexityDefects.isNull()) throw new RuntimeException("Given convexityDefects has NULL values");
+        if(convexityDefects.total() == 0) throw new RuntimeException("Given convexityDefects has no values");
+
+        CvSeq depthPoints = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), memory);
+
+        if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
+
+            int averageDepth = 0;
+            int x = 0;
+            int y = 0;
+
+            CvPoint tempPoint = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
+
+            for (int i = 0; i < convexityDefects.total(); i++) {
+                CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
+                if(defect.depth() > 10) {
+                    cvSeqPush(depthPoints, defect.depth_point());
+
+                    defect.start(tempPoint);
+
+                    x += defect.depth_point().x();
+                    y += defect.depth_point().y();
+                    averageDepth += defect.depth();
+                    tempPoint = defect.end();
+                }
+            }
+        }
+        return depthPoints;
+    }
+
+    public static CvPoint averagePosition(CvSeq contour) {
+        if(contour == null) throw new RuntimeException("Given contour is NULL");
+        if(contour.isNull()) throw new RuntimeException("Given contour has NULL values");
+        if(contour.total() == 0) throw new RuntimeException("Given contour has no values");
+
+        int x = 0;
+        int y = 0;
+        for (int i = 0; i < contour.total(); i++) {
+            CvPoint tmp = new CvPoint(cvGetSeqElem(contour, i));
+                x += tmp.x();
+                y += tmp.y();
+        }
+
+        return cvPoint(x / contour.total(), y / contour.total());
+    }
+
+    public static CvPoint theHighestPoint(CvSeq contour) {
+        if(contour == null) throw new RuntimeException("Given contour is NULL");
+        if(contour.isNull()) throw new RuntimeException("Given contour has NULL values");
+        if(contour.total() == 0) throw new RuntimeException("Given contour has no values");
+
+        CvPoint theHighest = new CvPoint(cvGetSeqElem(contour, 0));;
+        for(int i = 0; i < contour.total(); i++) {
+            CvPoint tmp = new CvPoint(cvGetSeqElem(contour, i));
+            if(theHighest.y() > tmp.y()) theHighest = tmp;
+        }
+        return theHighest;
+    }
+
     private static void process() {
         for (;;) {
 
-            original = cvQueryFrame(camera);
+            IplImage original = cvQueryFrame(camera);
 
             IplImage mask = createMaskFromHSV(original);
 
@@ -226,91 +398,65 @@ public class Main {
 
             if (theBiggestContour != null && !theBiggestContour.isNull()) {
 
-                approximation = cvApproxPoly(theBiggestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, cvContourPerimeter(theBiggestContour) * 0.0015, 1);
+                CvSeq dominantPoints = findDominantPoints(theBiggestContour, ((int) (theBiggestContour.total() * 0.034)), 24);
+//                drawSequencePolyLines(dominantPoints, original);
 
-                if(approximation != null && !approximation.isNull()) {
+                CvMoments moments = new CvMoments();
 
-                    System.out.println("Approxi length: " + approximation.total());
+                cvMoments(theBiggestContour, moments);
 
-                    CvSeq dominantPoints = findDominantPoints(approximation, ((int) (approximation.total() * 0.2)), 120);
-                    System.out.println("Dominant points found: " + dominantPoints.total());
-                    drawSequence(approximation, original);
+                CvPoint centerOfTheArm = new CvPoint();
 
-                    CvMoments moments = new CvMoments();
-
-                    cvMoments(theBiggestContour, moments);
-
-                    CvPoint centerOfTheArm = new CvPoint();
-
-                    if(moments.m00()!= 0) {
-                        centerOfTheArm.x(((int) (moments.m10() / moments.m00())));
-                        centerOfTheArm.y((int)(moments.m01() / moments.m00()));
-                    }
-
-                    cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
-
-                    CvSeq convexHull = cvConvexHull2(approximation, memory, CV_CLOCKWISE, 0);
-
-                    if(convexHull != null && !convexHull.isNull() && convexHull.total() > 0) {
-
-                        CvSeq convexityDefects = cvConvexityDefects(approximation, convexHull, memory);
-
-                        if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
-
-                            CvPoint centerOfMass = new CvPoint();
-
-                            int averageDepth = 0;
-                            int x = 0;
-                            int y = 0;
-
-                            CvPoint tempPoint = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
-
-                            CvSeq depthPoints = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), memory);
-
-                            for (int i = 0; i < convexityDefects.total(); i++) {
-
-                                CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
-                                if(defect.depth() > 10) {
-                                    cvSeqPush(depthPoints, defect.depth_point());
-
-                                    defect.start(tempPoint);
-
-                                    x += defect.depth_point().x();
-                                    y += defect.depth_point().y();
-                                    averageDepth += defect.depth();
-
-                                    cvCircle(original, defect.depth_point(), 4, CvScalar.YELLOW, 2, 8, 0);
-                                    cvCircle(original, defect.start(), 4, CvScalar.BLUE, 2, 8, 0);
-                                    cvCircle(original, defect.end(), 4, CvScalar.BLUE, 2, 8, 0);
-                                    tempPoint = defect.end();
-                                }
-                            }
-
-                            if(depthPoints.total() > 0) {
-                                averageDepth = Math.round(averageDepth / depthPoints.total());
-
-                                float [] center = new float[2];
-                                float [] radius = new float[1];
-
-                                cvMinEnclosingCircle(depthPoints, center, radius);
-
-                                CvPoint centerOfThePalm = cvPoint(((int) ((center[0] + x / depthPoints.total()) / 2)), ((int) ((center[1] + y / depthPoints.total()) / 2)));
-
-                                cvCircle(original, centerOfThePalm, ((int) (radius[0] + averageDepth) / 2), CvScalar.BLUE, 2, 8, 0);
-
-                                centerOfMass.x(x / depthPoints.total());
-                                centerOfMass.y(y / depthPoints.total());
-
-                                cvCircle(original, centerOfMass, 4, CvScalar.BLUE, 3, 8, 0);
-                            }
-
-                        }
-                        cvClearSeq(convexityDefects);
-                        cvClearSeq(convexHull);
-                    }
+                if(moments.m00()!= 0) {
+                    centerOfTheArm.x(((int) (moments.m10() / moments.m00())));
+                    centerOfTheArm.y((int)(moments.m01() / moments.m00()));
                 }
+                cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
 
+                CvSeq approximation = cvApproxPoly(theBiggestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, cvContourPerimeter(theBiggestContour) * 0.0015, 1);
+                CvSeq convexHull = cvConvexHull2(approximation, memory, CV_CLOCKWISE, 0);
+                CvSeq convexityDefects = cvConvexityDefects(approximation, convexHull, memory);
+                CvSeq theDeepestPoints;
+
+                if(!convexityDefects.isNull() && convexityDefects.total() > 1) {
+                    theDeepestPoints = findDeepestPoints(convexityDefects);
+
+                    float [] tempEnclosingCircleCenter = new float[2];
+                    float [] enclosingCircleRadius = new float[1];
+
+                    if(theDeepestPoints.total() > 1 && dominantPoints.total() > 1) {
+                        cvMinEnclosingCircle(theDeepestPoints, tempEnclosingCircleCenter, enclosingCircleRadius);
+                        CvPoint enclosingCircleCenter = cvPoint(((int) tempEnclosingCircleCenter[0]), ((int)tempEnclosingCircleCenter[1]));
+                        CvPoint averageDepthPointPosition = averagePosition(theDeepestPoints);
+
+                        enclosingCircleRadius[0] = (float) (enclosingCircleRadius[0] - vectorLength(vector(enclosingCircleCenter, averageDepthPointPosition)) / 2);
+
+                        CvPoint averageCenter = cvPoint((averageDepthPointPosition.x() + enclosingCircleCenter.x()) / 2,
+                                (averageDepthPointPosition.y() + enclosingCircleCenter.y()) / 2);
+
+                        CvSeq fingers = findFingers(dominantPoints, averageCenter, enclosingCircleRadius[0]);
+
+                        if(robot != null && fingers.total() > 0) {
+                            CvPoint theHighestFinger = theHighestPoint(fingers);
+                            robot.mouseMove((int) (screenWidth*(((float)theHighestFinger.x()) / screenWidth)),
+                                    (int) (screenHeight*(((float)theHighestFinger.y()) / screenHeight)));
+                        }
+
+                        System.out.println("Fingers found: " + fingers.total());
+                        cvCircle(original, averageCenter, (int) Math.abs(enclosingCircleRadius[0]), CvScalar.RED, 2, 8, 0);
+
+                        drawSequencePolyLines(fingers, original);
+                        cvClearSeq(fingers);
+                    }
+
+                    cvClearSeq(theDeepestPoints);
+                }
+                cvClearSeq(convexityDefects);
+                cvClearSeq(convexHull);
+                cvClearSeq(approximation);
+                cvClearSeq(theBiggestContour);
             }
+
             cvShowImage("Hue", hue);
             cvShowImage("Saturation", saturation);
             cvShowImage("Value", value);
@@ -321,10 +467,10 @@ public class Main {
             cvReleaseImage(hue);
             cvReleaseImage(saturation);
             cvReleaseImage(mask);
+//            cvReleaseImage(original);
+
             if (waitKey(1) == 0) break;
         }
-
-        Thread images = new Thread();
 
     }
 
