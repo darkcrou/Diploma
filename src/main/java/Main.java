@@ -438,8 +438,8 @@ public class Main {
 
                         if(robot != null && fingers.total() > 0) {
                             CvPoint theHighestFinger = theHighestPoint(fingers);
-                            robot.mouseMove((int) (screenWidth*(((float)theHighestFinger.x()) / screenWidth)),
-                                    (int) (screenHeight*(((float)theHighestFinger.y()) / screenHeight)));
+                            robot.mouseMove((int) (screenWidth*(((float)theHighestFinger.x()) / original.width())),
+                                    (int) (screenHeight*(((float)theHighestFinger.y()) / original.height())));
                         }
 
                         System.out.println("Fingers found: " + fingers.total());
