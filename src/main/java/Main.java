@@ -1,19 +1,14 @@
 /**
- * Created by crou on 26.03.15.
+ * Created by crou on 10.03.15.
  */
-
 
 import org.bytedeco.javacpp.*;
 import org.bytedeco.javacv.CanvasFrame;
-import sun.awt.X11GraphicsDevice;
 
-import javax.swing.*;
 import java.awt.*;
-import java.awt.Point;
 import java.awt.event.InputEvent;
 import java.util.*;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 
 import static org.bytedeco.javacpp.opencv_core.*;
 import static org.bytedeco.javacpp.opencv_highgui.*;
@@ -21,51 +16,24 @@ import static org.bytedeco.javacpp.opencv_imgproc.*;
 
 public class Main {
 
-    private static ConcurrentHashMap<String, Integer> settingsHolder = new ConcurrentHashMap<String, Integer>();
-
-    private static boolean byHSV;
-
     private static int hueMin = 0;
     private static int hueMax = 180;
     private static int valueMin = 0;
     private static int valueMax = 255;
     private static int satMin = 0;
     private static int satMax = 255;
-    private static int yMax = 255;
-    private static int yMin = 0;
-    private static int CrMax = 255;
-    private static int CrMin = 0;
-    private static int CbMax = 255;
-    private static int CbMin = 0;
-
-    private static boolean hueInverted;
-    private static boolean saturationInverted;
-    private static boolean valueInverted;
-    private static boolean channelYInverted;
-    private static boolean chanelCrInverted;
-    private static boolean chanelCbInverted;
 
     private static CvCapture camera;
-
-    private static IplImage original;
 
     private static IplImage hue;
     private static IplImage saturation;
     private static IplImage value;
-    private static IplImage chanelY;
-    private static IplImage chanelCr;
-    private static IplImage chanelCb;
-
-    private static byte[] calibrationHueAndValue;
 
     private static IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 1, 1, CV_SHAPE_ELLIPSE);
-    private static IplConvKernel kernel2 = cvCreateStructuringElementEx(7, 7, 4, 4, CV_SHAPE_ELLIPSE);
-    private static CvMemStorage memory = cvCreateMemStorage(0xffff);
-    private static CvSeq approximation;
-    private static CvPoint centerOfPalm;
-    private static HashSet<CvPoint> fingerTips = new HashSet<>();
 
-    private static Robot robot;
+    private static CvMemStorage memory = cvCreateMemStorage(0xffff);
+
+    private static Robot mouseRobot;
 
     private static String originalWindow = "original window";
     private static double screenWidth;
@@ -77,18 +45,51 @@ public class Main {
     private static double frameWidth;
     private static boolean canClick;
     private static boolean handDetected;
+    private static boolean canMouseMove;
+    private static int morphologyTimes;
+
+    private static LinkedList<CvPoint> palmCenterBuffer;
+    private static LinkedList<Float> palmRadiusBuffer;
+    private static double frameLimitY;
+    private static CvSeq fingerHistory;
+    private static CvSeq cursorHistory;
+    private static double proportionX;
+    private static double proportionY;
 
     public static void main(String[] args) {
 
+        //Wejście wideo
         camera = cvCreateCameraCapture(0);
+
+        //Wysokość obrazku wchodzącego
         frameHeight = cvGetCaptureProperty(camera, CV_CAP_PROP_FRAME_HEIGHT);
+        //Szerokość obrazku wchodzącego
         frameWidth = cvGetCaptureProperty(camera, CV_CAP_PROP_FRAME_WIDTH);
+
+        //Ekran na którym znajduję się kursor
         GraphicsDevice device = CanvasFrame.getDefaultScreenDevice();
+        //Wysokość ekranu
         screenHeight = device.getDefaultConfiguration().getBounds().getHeight();
+        //Szerokość ekranu
         screenWidth = device.getDefaultConfiguration().getBounds().getWidth();
 
+        //Limit położenia palca
+        frameLimitY = frameHeight * 0.8;
+
+        //Proporcje x
+        proportionX = frameWidth / screenWidth;
+        //Proporcje y
+        proportionY = frameLimitY / screenWidth;
+
+        morphologyTimes = 1;
+        palmCenterBuffer = new LinkedList<CvPoint>();
+        palmRadiusBuffer = new LinkedList<>();
+
+        fingerHistory = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvSeq.class), Loader.sizeof(CvPoint.class), memory);
+        cursorHistory = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvSeq.class), Loader.sizeof(CvPoint.class), memory);
+
         try {
-            robot = new Robot(CanvasFrame.getDefaultScreenDevice());
+            mouseRobot = new Robot(CanvasFrame.getDefaultScreenDevice());
         } catch (AWTException e) {
             System.err.print("Cannot initialize ROBOT, so you could not move the cursor");
         }
@@ -104,7 +105,6 @@ public class Main {
         }
 
         cvReleaseStructuringElement(kernel);
-        cvReleaseStructuringElement(kernel2);
         cvReleaseCapture(camera);
         cvDestroyAllWindows();
     }
@@ -112,6 +112,10 @@ public class Main {
     public static int waitKey(int FPS) {
         char key = (char) cvWaitKey(FPS);
         switch (key) {
+            case '[': if(morphologyTimes - 1 <= 0) morphologyTimes = 0; else morphologyTimes--; break;
+            case ']': morphologyTimes++; break;
+            case 'p': return 2;
+            case 'm': canMouseMove = !canMouseMove; break;
             case 27:
             case 'q':
                 return 0;
@@ -159,7 +163,6 @@ public class Main {
      * Funkcja wyszukuje nawjekszy zarys na podanej masce.
      * @param mask - maska na ktorej bedzie wyszukiwany zarys
      * @return CvSeq z wyszukanym zarysem*/
-
      private static CvSeq findTheBiggestContour(IplImage mask) {
 
         cvClearMemStorage(memory);
@@ -189,7 +192,6 @@ public class Main {
      * Funkcja ktora rozdziela obrazek na 3 kanaly przestrzeni kolorowej HSV, filtruje kanaly i skleja z powrotem w nowoutworzona maske
      * @param original - oryginalny obrazek dla przetwarzania do maski
      * @return mask - maska */
-
      private static IplImage createMaskFromHSV(IplImage original) {
 
         IplImage mask = cvCreateImage(original.cvSize(), IPL_DEPTH_8U, 1);
@@ -204,9 +206,9 @@ public class Main {
         cvInRangeS(value, cvScalar(valueMin), cvScalar(valueMax), value);
         cvInRangeS(saturation, cvScalar(satMin), cvScalar(satMax), saturation);
 
-        cvDilate(hue, hue, kernel, 1);
-        cvErode(hue, hue, kernel, 2);
-//        cvMorphologyEx(hue, hue, null, kernel, CV_MOP_CLOSE, 2);
+        cvDilate(hue, hue, kernel, morphologyTimes);
+        cvErode(hue, hue, kernel, morphologyTimes + 3);
+//        cvMorphologyEx(hue, hue, null, kernel, CV_MOP_CLOSE, morphologyTimes);
 
         cvNot(hue, hue);
         cvAnd(hue, value, mask);
@@ -226,11 +228,11 @@ public class Main {
         }
     }
 
-    private static void drawSequenceCircles(CvSeq approximation, IplImage on) {
+    private static void drawSequenceCircles(CvSeq approximation, IplImage on, CvScalar color, int radius, int thikness) {
         for (int i = 0; i < approximation.total(); i++) {
             BytePointer pointer = cvGetSeqElem(approximation, i);
             CvPoint p = new CvPoint(pointer);
-            cvCircle(on, p, 3, cvScalar(255, 0, 0, 255), 3, 7, 0);
+            cvCircle(on, p, radius, color, thikness, 7, 0);
         }
     }
 
@@ -250,15 +252,14 @@ public class Main {
                 cvSeqPush(fingers, dominantPoint);
             }
         }
-        if(fingers.total() == 5) handDetected = true;
 
+        if(fingers.total() == 5) handDetected = true;
         return fingers;
     }
 
     private static CvSeq findDominantPoints(CvSeq contour, int minDist, int angle, CvPoint centerOfPalm) {
         CvSeq points = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(contour.getClass()),
                     Loader.sizeof(CvPoint.class), memory);
-        int groupCounter = 0;
         double angleCosine = Math.cos(angle);
         LinkedList<CvPoint> group = new LinkedList<>();
 
@@ -325,48 +326,6 @@ public class Main {
         return localDominant;
     }
 
-    public static CvPoint localMostPreferred(List segment, CvPoint centerOfPalm) {
-        if(segment == null) throw new RuntimeException("Your local contour is NULL");
-        int contourLength = segment.size();
-        CvPoint localDominant = null;
-        if(contourLength < 3){
-            if(contourLength == 2) {
-                CvPoint first = (CvPoint) segment.get(0);
-                CvPoint second = (CvPoint) segment.get(1);
-                localDominant = new CvPoint();
-                localDominant.x((first.x() + second.x())/2);
-                localDominant.y((first.y() + second.y())/2);
-                return localDominant;
-            }
-            if(contourLength == 1) return (CvPoint)segment.get(0);
-            return localDominant;
-        }
-
-        CvPoint first = (CvPoint)segment.get(0);
-        CvPoint last = (CvPoint)segment.get(contourLength - 1);
-        CvPoint centered = cvPoint((first.x() + last.x()) / 2, (first.y() + last.y()) / 2);
-
-        double theLongestVector = vectorLength(vector(first, last));
-        int [] mainVector = vector(centerOfPalm, centered);
-
-        for(int i = 1; i < contourLength - 1; i++) {
-            CvPoint temp = (CvPoint)segment.get(i);
-//            int [] tempVector = vector(temp, first);
-//            double t = (tempVector[0] * mainVector[0] + tempVector[1] * mainVector[1]) / vectorLength(mainVector);
-//            double tempLength = vectorLength(new double [] {(tempVector[0] + mainVector[0] * t), (tempVector[1] + mainVector[1] * t)});
-
-            double tempLength = Math.abs((mainVector[1] * temp.x() - mainVector[0] * temp.y() + last.x()*first.y() - last.y()*first.x())) / Math.sqrt(vectorLength(mainVector));
-//            double tempLength = ((last.y() - first.y()) * temp.x() + (first.x() - last.x()) * temp.y() - (first.x() * last.y() - last.x() * first.y()))/
-//                    Math.sqrt((last.x() - first.x())*(last.x() - first.x()) + (last.y() - first.y())*(last.y() - first.y()));
-            if(tempLength < theLongestVector) {
-                localDominant = temp;
-                theLongestVector = tempLength;
-            }
-        }
-
-        return centered;
-    }
-
     private static double vectorLength(int [] vector) {
         return Math.sqrt(vector[0]*vector[0] + vector[1]*vector[1]);
     }
@@ -400,22 +359,15 @@ public class Main {
 
         if(convexityDefects != null && !convexityDefects.isNull() && convexityDefects.total() > 0) {
 
-            int averageDepth = 0;
-            int x = 0;
-            int y = 0;
-
             CvPoint tempPoint = new CvConvexityDefect(cvGetSeqElem(convexityDefects, convexityDefects.total() - 1)).end();
 
             for (int i = 0; i < convexityDefects.total(); i++) {
                 CvConvexityDefect defect = new CvConvexityDefect(cvGetSeqElem(convexityDefects, i));
-                if(defect.depth() > 10) {
+                if(defect.depth() > 10) { //correct me
                     cvSeqPush(depthPoints, defect.depth_point());
 
                     defect.start(tempPoint);
 
-                    x += defect.depth_point().x();
-                    y += defect.depth_point().y();
-                    averageDepth += defect.depth();
                     tempPoint = defect.end();
                 }
             }
@@ -444,7 +396,7 @@ public class Main {
         if(contour.isNull()) throw new RuntimeException("Given contour has NULL values");
         if(contour.total() == 0) throw new RuntimeException("Given contour has no values");
 
-        CvPoint theHighest = new CvPoint(cvGetSeqElem(contour, 0));;
+        CvPoint theHighest = new CvPoint(cvGetSeqElem(contour, 0));
         for(int i = 0; i < contour.total(); i++) {
             CvPoint tmp = new CvPoint(cvGetSeqElem(contour, i));
             if(theHighest.y() > tmp.y()) theHighest = tmp;
@@ -464,6 +416,7 @@ public class Main {
 
             if (theBiggestContour != null && !theBiggestContour.isNull()) {
 
+                drawSequencePolyLines(theBiggestContour, original, CvScalar.RED);
                 CvMoments moments = new CvMoments();
 
                 cvMoments(theBiggestContour, moments);
@@ -474,17 +427,23 @@ public class Main {
                     centerOfTheArm.x(((int) (moments.m10() / moments.m00())));
                     centerOfTheArm.y((int) (moments.m01() / moments.m00()));
                 }
-                cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
+//                cvCircle(original, centerOfTheArm, 4, CvScalar.MAGENTA, 2, 8, 0);
 
                 CvSeq approximation = cvApproxPoly(theBiggestContour, Loader.sizeof(CvContour.class), memory, CV_POLY_APPROX_DP, cvContourPerimeter(theBiggestContour) * 0.0015, 1);
                 CvSeq convexHull = cvConvexHull2(approximation, memory, CV_CLOCKWISE, 0);
                 CvSeq convexHullForDrawing = cvConvexHull2(approximation, memory, CV_CLOCKWISE, 1);
                 drawSequencePolyLines(convexHullForDrawing, original, cvScalar(0xff0000));
                 CvSeq convexityDefects = cvConvexityDefects(approximation, convexHull, memory);
-                CvSeq theDeepestPoints;
 
                 if(!convexityDefects.isNull() && convexityDefects.total() > 1) {
-                    theDeepestPoints = findDeepestPoints(convexityDefects);
+                    CvSeq theDeepestPoints = findDeepestPoints(convexityDefects);
+                    drawSequenceCircles(theDeepestPoints, original, cvScalar(0, 255, 255, 255), 3, 3);
+                    if(theDeepestPoints.total() < 2) {
+                        CvPoint theHighestPoint = theHighestPoint(theBiggestContour);
+                        cvCircle(original, theHighestPoint, 6, cvScalar(255, 0, 255, 255), 8, 8, 0);
+                        cvSeqPush(theDeepestPoints, theHighestPoint);
+                    }
+
 
                     float [] tempEnclosingCircleCenter = new float[2];
                     float [] enclosingCircleRadius = new float[1];
@@ -494,49 +453,87 @@ public class Main {
                         CvPoint enclosingCircleCenter = cvPoint(((int) tempEnclosingCircleCenter[0]), ((int)tempEnclosingCircleCenter[1]));
                         CvPoint averageDepthPointPosition = averagePosition(theDeepestPoints);
 
-                        enclosingCircleRadius[0] = (float) (enclosingCircleRadius[0] - vectorLength(vector(enclosingCircleCenter, averageDepthPointPosition)) / 2);
 
                         CvPoint averageCenter = cvPoint((averageDepthPointPosition.x() + enclosingCircleCenter.x()) / 2,
                                 (averageDepthPointPosition.y() + enclosingCircleCenter.y()) / 2);
 
+
+                        if(palmCenterBuffer.size() > 3) {
+                            int centerPosX = averageCenter.x();
+                            int centerPosY = averageCenter.y();
+
+                            palmCenterBuffer.removeFirst();
+
+                            for (int i = 0; i < palmCenterBuffer.size(); i++) {
+                                int x = palmCenterBuffer.get(i).x();
+                                int y = palmCenterBuffer.get(i).y();
+                                centerPosY = (centerPosY + y) / 2;
+                                centerPosX = (centerPosX + x) / 2;
+                            }
+                            averageCenter.x(centerPosX);
+                            averageCenter.y(centerPosY);
+                        }
+
+                        palmCenterBuffer.add(averageCenter);
+
+                        if(palmRadiusBuffer.size() > 3) {
+                            float radius = enclosingCircleRadius[0];
+
+                            palmRadiusBuffer.removeFirst();
+
+                            for (int i = 0; i < palmRadiusBuffer.size(); i++) {
+                                float tmpRad = palmRadiusBuffer.get(i);
+                                radius = (radius + tmpRad) / 2;
+                            }
+                            enclosingCircleRadius[0] = radius;
+                        }
+
+                        palmRadiusBuffer.add(enclosingCircleRadius[0]);
+
+
                         int dominantDistance = (theBiggestContour.total() * 0.03) < 25? 25: (int) (theBiggestContour.total() * 0.03);
-                        CvSeq dominantPoints = findDominantPoints(theBiggestContour, dominantDistance, 70, averageCenter);
-                        drawSequenceCircles(dominantPoints, original);
+                        CvSeq dominantPoints = findDominantPoints(theBiggestContour, dominantDistance, 90, averageCenter);
+
+                        cvCircle(original, enclosingCircleCenter, ((int) enclosingCircleRadius[0]), AbstractCvScalar.CYAN, 2, 8, 0);
+                        cvCircle(original, enclosingCircleCenter, ((int) (enclosingCircleRadius[0] * 1.3)), cvScalar(200, 200, 200, 255), 2, 8, 0);
 
                         if(dominantPoints.total() > 0) {
                             CvSeq fingers = findFingers(dominantPoints, averageCenter, enclosingCircleRadius[0]);
+                            drawSequenceCircles(fingers, original, AbstractCvScalar.GREEN, 2, 1);
 
-                            if(fingers.total() == 1) {
-                                CvPoint currentFingerLocation = theHighestPoint(fingers);
-                                if(lastTopFingerLocation != null && handDetected) {
-                                    int newCurPosX = (int) ((currentFingerLocation.x() / frameWidth) * screenWidth);
-                                    int newCurPosY = (int) ((currentFingerLocation.y() / frameHeight) * screenHeight);
-                                    if(lastCursorPosition == null) lastCursorPosition = cvPoint(newCurPosX, newCurPosY);
-                                    if(Math.abs(newCurPosX - lastCursorPosition.x()) / (lastCursorPosition.x()) < 0.01 &&
-                                            Math.abs(newCurPosY - lastCursorPosition.y()) / (lastCursorPosition.y()) < 0.01 ) {
-                                        robot.mouseMove(newCurPosX, newCurPosY);
+                            if(canMouseMove) {
+                                if(fingers.total() == 1) {
+                                    CvPoint currentFingerLocation = new CvPoint(cvGetSeqElem(fingers, 0));
+                                    if(lastTopFingerLocation != null && handDetected) {
+                                        int newCurPosX = (int) ((currentFingerLocation.x() / frameWidth) * screenWidth);
+                                        int newCurPosY = (int) ((currentFingerLocation.y() / frameHeight) * screenHeight);
+                                        if(lastCursorPosition == null) lastCursorPosition = cvPoint(newCurPosX, newCurPosY);
+                                        if(Math.abs(newCurPosX - lastCursorPosition.x()) / (lastCursorPosition.x()) < 0.006 &&
+                                                Math.abs(newCurPosY - lastCursorPosition.y()) / (lastCursorPosition.y()) < 0.006 ) {
+                                            mouseRobot.mouseMove((newCurPosX + lastCursorPosition.x()) / 2, (newCurPosY + lastCursorPosition.y()) / 2);
+                                        }
+                                        lastCursorPosition.x(newCurPosX);
+                                        lastCursorPosition.y(newCurPosY);
+                                        canClick = true;
                                     }
-                                    lastCursorPosition.x(newCurPosX);
-                                    lastCursorPosition.y(newCurPosY);
-                                    canClick = true;
+                                    lastTopFingerLocation = currentFingerLocation;
+                                } else if(fingers.total() == 2 && canClick && handDetected) {
+                                    mouseRobot.mousePress(InputEvent.BUTTON1_MASK);
+                                    mouseRobot.delay(100);
+                                    mouseRobot.mouseRelease(InputEvent.BUTTON1_MASK);
+                                    canClick = false;
                                 }
-                                lastTopFingerLocation = currentFingerLocation;
-                            } else if(fingers.total() == 2 && canClick && handDetected) {
-                                robot.mousePress(InputEvent.BUTTON1_MASK);
-                                robot.delay(100);
-                                robot.mouseRelease(InputEvent.BUTTON1_MASK);
-                                canClick = false;
                             }
 
                             System.out.println("Fingers found: " + fingers.total());
-                            cvCircle(original, averageCenter, (int) Math.abs(enclosingCircleRadius[0]), CvScalar.RED, 2, 8, 0);
+//                            cvCircle(original, averageCenter, (int) Math.abs(enclosingCircleRadius[0]), CvScalar.RED, 2, 8, 0);
 
-                            drawSequencePolyLines(fingers, original, cvScalar(0, 255, 0, 255));
+//                            drawSequencePolyLines(fingers, original, cvScalar(0, 255, 0, 255));
                             cvClearSeq(fingers);
                         }
+                        cvClearSeq(theDeepestPoints);
                     }
 
-                    cvClearSeq(theDeepestPoints);
                 }
                 cvClearSeq(convexityDefects);
                 cvClearSeq(convexHull);
@@ -550,51 +547,23 @@ public class Main {
 //            cvShowImage("Mask", mask);
             cvShowImage(originalWindow, original);
 
+
+            int keyWaitRes = waitKey(1);
+
+            if(keyWaitRes == 2) {
+                cvSaveImage("original-image-" + new Date().toString() + ".png",original);
+                cvSaveImage("hue-image-" + new Date().toString() + ".png",hue);
+                cvSaveImage("saturation-image-" + new Date().toString() + ".png",saturation);
+                cvSaveImage("value-image-" + new Date().toString() + ".png",value);
+                cvSaveImage("mask-image-" + new Date().toString() + ".png",mask);
+            } else if(keyWaitRes == 0) break;
             cvReleaseImage(value);
             cvReleaseImage(hue);
             cvReleaseImage(saturation);
             cvReleaseImage(mask);
 //            cvReleaseImage(original);
-
-            if (waitKey(1) == 0) break;
+            cvClearMemStorage(memory);
         }
 
-    }
-
-    private static void configurationWindow() {
-        Runnable configWindow = () -> {
-            JFrame configurationFrame = new JFrame("Configuration frame");
-            configurationFrame.setMinimumSize(new Dimension(300, 100));
-
-            JSlider hueMinSlider = new JSlider(0, 180);
-            JSlider hueMaxSlider = new JSlider(0, 180);
-            hueMinSlider.addPropertyChangeListener((e) -> {
-                JSlider slider = (JSlider) e.getSource();
-                if(!slider.getValueIsAdjusting()){
-                    settingsHolder.put("hueMin", slider.getValue());
-                }
-            });
-
-            JSlider saturationMinSlider = new JSlider(0, 255);
-            JSlider saturationMaxSlider = new JSlider(0, 255);
-            JSlider valueMinSlider = new JSlider(0, 255);
-            JSlider valueMaxSlider = new JSlider(0, 255);
-            JSlider chanelYMinSlider = new JSlider(0, 255);
-            JSlider chanelYMaxSlider = new JSlider(0, 255);
-            JSlider chanelCrMinSlider = new JSlider(0, 255);
-            JSlider chanelCrMaxSlider = new JSlider(0, 255);
-            JSlider chanelCbMinSlider = new JSlider(0, 255);
-            JSlider chanelCbMaxSlider = new JSlider(0, 255);
-
-            JCheckBox colorSchema = new JCheckBox("Color schema selector");
-
-            configurationFrame.add(hueMinSlider);
-            configurationFrame.setVisible(true);
-            configurationFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-
-        };
-
-        Thread windowThread = new Thread(configWindow);
-        windowThread.start();
     }
 }
