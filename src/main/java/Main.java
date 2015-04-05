@@ -32,6 +32,7 @@ public class Main {
     private static IplConvKernel kernel = cvCreateStructuringElementEx(3, 3, 1, 1, CV_SHAPE_ELLIPSE);
 
     private static CvMemStorage memory = cvCreateMemStorage(0xffff);
+    private static CvMemStorage histMemory = cvCreateMemStorage(0xffff);
 
     private static Robot mouseRobot;
 
@@ -53,8 +54,11 @@ public class Main {
     private static double frameLimitY;
     private static CvSeq fingerHistory;
     private static CvSeq cursorHistory;
+    private static LinkedList<Integer> fingersHistory;
     private static double proportionX;
     private static double proportionY;
+    private static boolean canRecordPosition;
+    private static CvPoint lastThreeFingersAveragePosition;
 
     public static void main(String[] args) {
 
@@ -85,8 +89,10 @@ public class Main {
         palmCenterBuffer = new LinkedList<CvPoint>();
         palmRadiusBuffer = new LinkedList<>();
 
-        fingerHistory = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvSeq.class), Loader.sizeof(CvPoint.class), memory);
-        cursorHistory = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvSeq.class), Loader.sizeof(CvPoint.class), memory);
+        fingerHistory = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), histMemory);
+        cursorHistory = cvCreateSeq(CV_SEQ_ELTYPE_POINT, Loader.sizeof(CvContour.class), Loader.sizeof(CvPoint.class), histMemory);
+
+        fingersHistory = new LinkedList<>();
 
         try {
             mouseRobot = new Robot(CanvasFrame.getDefaultScreenDevice());
@@ -104,6 +110,12 @@ public class Main {
 
         }
 
+        cvClearSeq(fingerHistory);
+        cvClearSeq(cursorHistory);
+        cvClearMemStorage(memory);
+        cvClearMemStorage(histMemory);
+        cvReleaseMemStorage(memory);
+        cvReleaseMemStorage(histMemory);
         cvReleaseStructuringElement(kernel);
         cvReleaseCapture(camera);
         cvDestroyAllWindows();
@@ -112,6 +124,8 @@ public class Main {
     public static int waitKey(int FPS) {
         char key = (char) cvWaitKey(FPS);
         switch (key) {
+            case 'r': canRecordPosition = true; break;
+            case 'R': return 3;
             case '[': if(morphologyTimes - 1 <= 0) morphologyTimes = 0; else morphologyTimes--; break;
             case ']': morphologyTimes++; break;
             case 'p': return 2;
@@ -310,13 +324,9 @@ public class Main {
 
         for(int i = 1; i < contourLength - 1; i++) {
             CvPoint temp = (CvPoint)segment.get(i);
-//            int [] tempVector = vector(temp, first);
-//            double t = (tempVector[0] * mainVector[0] + tempVector[1] * mainVector[1]) / vectorLength(mainVector);
-//            double tempLength = vectorLength(new double [] {(tempVector[0] + mainVector[0] * t), (tempVector[1] + mainVector[1] * t)});
 
             double tempLength = Math.abs((mainVector[1] * temp.x() - mainVector[0] * temp.y() + last.x()*first.y() - last.y()*first.x())) / Math.sqrt(vectorLength(mainVector));
-//            double tempLength = ((last.y() - first.y()) * temp.x() + (first.x() - last.x()) * temp.y() - (first.x() * last.y() - last.x() * first.y()))/
-//                    Math.sqrt((last.x() - first.x())*(last.x() - first.x()) + (last.y() - first.y())*(last.y() - first.y()));
+
             if(tempLength > theLongestVector) {
                 localDominant = temp;
                 theLongestVector = tempLength;
@@ -405,6 +415,7 @@ public class Main {
     }
 
     private static void process() {
+        mainloop:
         for (;;) {
 
             IplImage original = cvQueryFrame(camera);
@@ -492,7 +503,7 @@ public class Main {
 
 
                         int dominantDistance = (theBiggestContour.total() * 0.03) < 25? 25: (int) (theBiggestContour.total() * 0.03);
-                        CvSeq dominantPoints = findDominantPoints(theBiggestContour, dominantDistance, 90, averageCenter);
+                        CvSeq dominantPoints = findDominantPoints(theBiggestContour, dominantDistance, 70, averageCenter);
 
                         cvCircle(original, enclosingCircleCenter, ((int) enclosingCircleRadius[0]), AbstractCvScalar.CYAN, 2, 8, 0);
                         cvCircle(original, enclosingCircleCenter, ((int) (enclosingCircleRadius[0] * 1.3)), cvScalar(200, 200, 200, 255), 2, 8, 0);
@@ -505,36 +516,70 @@ public class Main {
                                 if(fingers.total() == 1) {
                                     CvPoint currentFingerLocation = new CvPoint(cvGetSeqElem(fingers, 0));
                                     if(lastTopFingerLocation != null && handDetected) {
-                                        int newCurPosX = (int) ((currentFingerLocation.x() / frameWidth) * screenWidth);
-                                        int newCurPosY = (int) ((currentFingerLocation.y() / frameHeight) * screenHeight);
-                                        if(lastCursorPosition == null) lastCursorPosition = cvPoint(newCurPosX, newCurPosY);
-                                        if(Math.abs(newCurPosX - lastCursorPosition.x()) / (lastCursorPosition.x()) < 0.006 &&
-                                                Math.abs(newCurPosY - lastCursorPosition.y()) / (lastCursorPosition.y()) < 0.006 ) {
-                                            mouseRobot.mouseMove((newCurPosX + lastCursorPosition.x()) / 2, (newCurPosY + lastCursorPosition.y()) / 2);
+                                        int newCurPosX = (int) (currentFingerLocation.x() / proportionX);
+                                        int newCurPosY = (int) (currentFingerLocation.y() / proportionY);
+                                        if(lastCursorPosition == null || lastCursorPosition.x() == 0 || lastCursorPosition.y() == 0)
+                                            lastCursorPosition = cvPoint(newCurPosX, newCurPosY);
+                                        if(Math.abs(newCurPosX - lastCursorPosition.x()) / (lastCursorPosition.x()) < 0.01 &&
+                                                Math.abs(newCurPosY - lastCursorPosition.y()) / (lastCursorPosition.y()) < 0.01 ) {
+                                            lastCursorPosition.x((newCurPosX + lastCursorPosition.x()) / 2);
+                                            lastCursorPosition.y((newCurPosY + lastCursorPosition.y()) / 2);
+                                            mouseRobot.mouseMove(lastCursorPosition.x(), lastCursorPosition.y());
                                         }
-                                        lastCursorPosition.x(newCurPosX);
-                                        lastCursorPosition.y(newCurPosY);
-                                        canClick = true;
+
+                                        if(canRecordPosition) {
+                                            cvSeqPush(cursorHistory, cvPoint(newCurPosX, newCurPosY));
+                                            cvSeqPush(fingerHistory, currentFingerLocation);
+                                        }
+
+                                        if(fingersHistory.size() > 10) {
+                                            int twoFingerCount = 0;
+                                            for(int i = fingersHistory.size() - 1; i > 0; i--) {
+                                                if(fingersHistory.get(i).equals(2)) twoFingerCount++; else break;
+                                            }
+                                            if(twoFingerCount > 4) {
+                                                mouseRobot.mousePress(InputEvent.BUTTON1_MASK);
+                                                mouseRobot.delay(100);
+                                                mouseRobot.mouseRelease(InputEvent.BUTTON1_MASK);
+                                            }
+                                        }
+                                        fingersHistory.add(1);
                                     }
                                     lastTopFingerLocation = currentFingerLocation;
-                                } else if(fingers.total() == 2 && canClick && handDetected) {
-                                    mouseRobot.mousePress(InputEvent.BUTTON1_MASK);
-                                    mouseRobot.delay(100);
-                                    mouseRobot.mouseRelease(InputEvent.BUTTON1_MASK);
-                                    canClick = false;
+                                } else if(fingers.total() == 2 && handDetected) {
+                                    fingersHistory.add(2);
+                                } else if(fingers.total() == 3 && handDetected) {
+                                    if(fingersHistory.size() > 10) {
+                                        int tmpX = 0;
+                                        int tmpY = 0;
+                                        for (int i = 0; i < 3; i++) {
+                                            CvPoint tmp = new CvPoint(cvGetSeqElem(fingers, i));
+                                            tmpX += tmp.x();
+                                            tmpY += tmp.y();
+                                        }
+                                        CvPoint curAveragePosition = cvPoint(tmpX / 3, tmpY / 3);
+
+                                        int lastFingersCount = fingersHistory.getLast();
+                                        int preLastFingersCount = fingersHistory.get(fingersHistory.size() - 2);
+                                        if (lastFingersCount == 3 && preLastFingersCount == 3) {
+                                            if (lastThreeFingersAveragePosition != null) {
+                                                int positionChangeDelta = lastThreeFingersAveragePosition.y() - curAveragePosition.y();
+                                                if (Math.abs(positionChangeDelta) > 10) {
+                                                    mouseRobot.mouseWheel((int) Math.signum(positionChangeDelta) * 3);
+                                                }
+                                            }
+                                        }
+                                        lastThreeFingersAveragePosition = curAveragePosition;
+                                    }
+                                    fingersHistory.add(3);
                                 }
                             }
-
-                            System.out.println("Fingers found: " + fingers.total());
-//                            cvCircle(original, averageCenter, (int) Math.abs(enclosingCircleRadius[0]), CvScalar.RED, 2, 8, 0);
-
-//                            drawSequencePolyLines(fingers, original, cvScalar(0, 255, 0, 255));
                             cvClearSeq(fingers);
                         }
                         cvClearSeq(theDeepestPoints);
                     }
-
                 }
+                //Czyszczenie pamięcie zajętej przez elementy klasy Seq
                 cvClearSeq(convexityDefects);
                 cvClearSeq(convexHull);
                 cvClearSeq(approximation);
@@ -547,22 +592,37 @@ public class Main {
 //            cvShowImage("Mask", mask);
             cvShowImage(originalWindow, original);
 
-
             int keyWaitRes = waitKey(1);
 
-            if(keyWaitRes == 2) {
-                cvSaveImage("original-image-" + new Date().toString() + ".png",original);
-                cvSaveImage("hue-image-" + new Date().toString() + ".png",hue);
-                cvSaveImage("saturation-image-" + new Date().toString() + ".png",saturation);
-                cvSaveImage("value-image-" + new Date().toString() + ".png",value);
-                cvSaveImage("mask-image-" + new Date().toString() + ".png",mask);
-            } else if(keyWaitRes == 0) break;
+            switch (keyWaitRes){
+                case 2:
+                    cvSaveImage("original-image-" + new Date().toString() + ".png",original);
+                    cvSaveImage("hue-image-" + new Date().toString() + ".png",hue);
+                    cvSaveImage("saturation-image-" + new Date().toString() + ".png",saturation);
+                    cvSaveImage("value-image-" + new Date().toString() + ".png",value);
+                    cvSaveImage("mask-image-" + new Date().toString() + ".png",mask);
+                    break;
+                case 3:
+                    IplImage cursorHistImage = cvCreateImage(cvSize((int) screenWidth, (int) screenHeight), IPL_DEPTH_8U, 3);
+                    cvZero(cursorHistImage);
+                    drawSequenceCircles(cursorHistory, cursorHistImage, cvScalar(0, 220, 200, 255), 2, 2);
+                    cvSaveImage("cursorHistory " + new Date().toString() + " .png", cursorHistImage);
+                    cvReleaseImage(cursorHistImage);
+
+                    IplImage fingerHistImage = cvCreateImage(cvSize((int) frameWidth, (int) frameHeight), IPL_DEPTH_8U, 3);
+                    cvZero(fingerHistImage);
+                    drawSequenceCircles(fingerHistory, fingerHistImage, cvScalar(0, 100, 200, 255), 2, 2);
+                    cvSaveImage("fingerHistory " + new Date().toString() + " .png", fingerHistImage);
+                    cvReleaseImage(fingerHistImage);
+                    break;
+
+                case 0: break mainloop;
+            }
+            //Czyszczenie pamięci utwożonych obrazów
             cvReleaseImage(value);
             cvReleaseImage(hue);
             cvReleaseImage(saturation);
             cvReleaseImage(mask);
-//            cvReleaseImage(original);
-            cvClearMemStorage(memory);
         }
 
     }
